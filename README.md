@@ -60,6 +60,7 @@ pip install tqdm>=4.65.0
     "backup_path": "./zip_backup", # 备份路径
     "server_path": "./server", # 服务器路径
     "world_names": ["world"], # 世界名称
+    "exclude_paths": [], # 排除备份的文件或目录，支持通配符，详见下方「排除规则」
     "auto_backup_enabled": false, # 是否启用自动备份
     "auto_backup_mode": "interval", # 自动备份模式
     "auto_backup_interval": 3600, # 自动备份间隔
@@ -72,6 +73,20 @@ pip install tqdm>=4.65.0
     "check_auto_save_status": true # 是否监测自动保存状态
 }
 ```
+
+### 🚫 排除规则
+
+`exclude_paths` 用于在备份时跳过不需要的文件或目录（如 `recordings` 录像、临时缓存等大体积内容），在扫描与打包阶段均会生效：
+
+```json
+"exclude_paths": ["recordings", "*.tmp", "world/region/cache"]
+```
+
+- **名称模式**（不含 `/`）：匹配任意深度的同名文件或目录，如 `"recordings"`、`"*.tmp"`
+- **路径模式**（含 `/`）：相对 `server_path` 匹配（需包含世界名前缀），如 `"world/recordings"`；也支持匹配任意父目录下的同路径结构，如 `"region/cache"` 可命中 `world/region/cache`
+- 通配符 `*` 与 `?` 可跨越路径层级；匹配区分大小写，各平台行为一致
+- 无效模式（空串或绝对路径如 `"/etc"`、`"C:/foo"`）会在备份开始时输出警告并忽略
+- 若 `world_names` 包含 `"."`（整个服务器目录），请将 `backup_path` 的目录名加入排除列表，避免备份文件自身被再次打包
 
 ## 📝 命令列表
 

@@ -14,6 +14,8 @@ from tqdm import tqdm
 
 from mcdreforged.api.all import *
 
+from .exclude import normalize_exclude_pattern, should_exclude
+
 
 class Configure(Serializable):
     turn_off_auto_save: bool = True
@@ -23,6 +25,8 @@ class Configure(Serializable):
     world_names: List[str] = [
         'world'
     ]
+    # 排除备份的文件或文件夹名称/路径模式
+    exclude_paths: List[str] = []
     # 自动备份相关配置
     auto_backup_enabled: bool = False  # 是否启用自动备份
     auto_backup_mode: str = 'interval'  # 备份模式: 'interval' 或 'date'
@@ -77,7 +81,7 @@ HelpMessage = '''
 §b / /_  | | |_) |  | |_) | | (_| || (__ |   < | |_| | |_) |
 §b/____| |_| .__/   |____/   \__,_| \___||_|\_\ \__,_| .__/ 
 §b         |_|                                        |_|    §6by XRain666§r
-§e ---------------------- v1.0.30 ---------------------- §r
+§e ---------------------- v1.1.0 ---------------------- §r
 §7{0} make [<注释>]§r 创建一个备份
 §7{0} list§r 列出最近10个备份
 §7{0} listall§r 列出所有备份
@@ -108,7 +112,7 @@ PLUGIN_LOADED_ART = r'''
 §b / /_  | | |_) |  | |_) | | (_| || (__ |   < | |_| | |_) |
 §b/____| |_| .__/   |____/   \__,_| \___||_|\_\ \__,_| .__/ §6by XRain666§r
 §b         |_|                                        |_|    §r
-§e ---------------------- v10.29 ---------------------- §r
+§e ---------------------- v1.1.0 ---------------------- §r
 '''
 
 '''
@@ -134,6 +138,43 @@ def touch_backup_folder():
         os.makedirs(config.backup_path)
 
 
+def prepare_exclude_patterns(server: ServerInterface, patterns: List[str]) -> List[str]:
+    """备份开始前归一化 exclude_paths，无效模式（空串或绝对路径）告警后忽略"""
+    prepared = []
+    for pattern in patterns:
+        norm = normalize_exclude_pattern(pattern)
+        if norm is None:
+            server.logger.warning(f'exclude_paths 模式 {pattern!r} 无效（为空或为绝对路径，模式需相对 server_path），已忽略')
+            continue
+        prepared.append(norm)
+    return prepared
+
+
+def iter_backup_files(server: ServerInterface, exclude_patterns: List[str]):
+    """遍历所有待备份文件，应用 exclude_paths 排除规则并对目录剪枝"""
+    for world in config.world_names:
+        world_path = os.path.join(config.server_path, world)
+        if not os.path.exists(world_path):
+            continue
+        if not os.path.isdir(world_path):
+            server.logger.warning(f'world_names 条目 {world!r} 不是目录，已跳过')
+            continue
+        if should_exclude(world_path, config.server_path, exclude_patterns):
+            server.logger.info(f'世界 {world} 命中 exclude_paths 排除规则，已跳过')
+            continue
+        for root, dirs, files in os.walk(world_path):
+            # 剪枝排除的目录，避免深入遍历
+            dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d), config.server_path, exclude_patterns)]
+            for file in files:
+                # 跳过 session.lock 文件
+                if file == 'session.lock':
+                    continue
+                file_path = os.path.join(root, file)
+                if should_exclude(file_path, config.server_path, exclude_patterns):
+                    continue
+                yield file_path
+
+
 def zip_world(server: ServerInterface, comment: Optional[str] = None):
     """压缩世界文件"""
     # 启动自动保存监控
@@ -141,25 +182,19 @@ def zip_world(server: ServerInterface, comment: Optional[str] = None):
         global checking_auto_save_status
         checking_auto_save_status = True
     try:
+        # 预处理排除规则，扫描与打包共用，保证两边行为一致
+        exclude_patterns = prepare_exclude_patterns(server, config.exclude_paths)
+
         # 获取总文件大小和数量
         total_size = 0
         file_count = 0
-        for world in config.world_names:
-            world_path = os.path.join(config.server_path, world)
-            if not os.path.exists(world_path):
-                continue
-            for root, _, files in os.walk(world_path):
-                for file in files:
-                    # 跳过 session.lock 文件
-                    if file == 'session.lock':
-                        continue
-                    file_path = os.path.join(root, file)
-                    if os.path.exists(file_path):
-                        try:
-                            total_size += os.path.getsize(file_path)
-                            file_count += 1
-                        except OSError:
-                            continue
+        for file_path in iter_backup_files(server, exclude_patterns):
+            if os.path.exists(file_path):
+                try:
+                    total_size += os.path.getsize(file_path)
+                    file_count += 1
+                except OSError:
+                    continue
 
         # 准备压缩
         timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
@@ -182,28 +217,17 @@ def zip_world(server: ServerInterface, comment: Optional[str] = None):
             if comment:
                 zf.comment = comment.encode()
 
-            # 遍历所有世界文件夹
-            for world in config.world_names:
-                world_path = os.path.join(config.server_path, world)
-                if not os.path.exists(world_path):
-                    continue
-
-                for root, _, files in os.walk(world_path):
-                    for file in files:
-                        # 跳过 session.lock 文件
-                        if file == 'session.lock':
-                            continue
-                        file_path = os.path.join(root, file)
-                        if os.path.exists(file_path):
-                            try:
-                                # 计算相对路径
-                                arcname = os.path.relpath(file_path, config.server_path)
-                                # 写入文件并更新进度条
-                                zf.write(file_path, arcname)
-                                progress.update(os.path.getsize(file_path))
-                            except (OSError, PermissionError) as e:
-                                server.logger.warning(f"跳过文件 {file_path}: {str(e)}")
-                                continue
+            # 遍历所有待备份文件并写入
+            for file_path in iter_backup_files(server, exclude_patterns):
+                if os.path.exists(file_path):
+                    try:
+                        # 计算相对路径
+                        arcname = os.path.relpath(file_path, config.server_path)
+                        # 写入文件并更新进度条
+                        zf.write(file_path, arcname)
+                        progress.update(os.path.getsize(file_path))
+                    except (OSError, PermissionError) as e:
+                        server.logger.warning(f"跳过文件 {file_path}: {str(e)}")
 
     except Exception as e:
         # 如果压缩失败，删除未完成的文件
